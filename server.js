@@ -31,7 +31,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const CAPTION_PROMPT = `Write one witty caption for this wedding photo.
+const PROMPT = `Write one witty caption for this wedding photo.
 Rules:
 - Base it only on visible details in this exact image (faces, posture, clothing, lighting, background).
 - Tone: playful, warm, and clever.
@@ -39,6 +39,9 @@ Rules:
 - No random names.
 - No surreal nonsense.
 Return only the caption.`;
+
+// Backward-compatible alias in case older code paths still reference CAPTION_PROMPT.
+const CAPTION_PROMPT = PROMPT;
 
 async function generateGeminiCaption({ base64, mime, fileId }) {
   const response = await fetch(
@@ -50,7 +53,7 @@ async function generateGeminiCaption({ base64, mime, fileId }) {
         contents: [{
           role: 'user',
           parts: [
-            { text: CAPTION_PROMPT },
+            { text: PROMPT },
             { text: `Photo ID for variation: ${fileId}` },
             { inline_data: { mime_type: mime, data: base64 } }
           ]
@@ -179,6 +182,10 @@ app.post('/api/caption', async (req, res) => {
     if (!fileId) return res.status(400).json({ error: 'fileId required' });
     if (!DRIVE_API_KEY || !GEMINI_API_KEY) {
       return res.status(500).json({ error: 'Server not configured. Set GOOGLE_API_KEY, and optionally GEMINI_API_KEY.' });
+    }
+
+    if (!DRIVE_API_KEY || !GEMINI_API_KEY) {
+      return res.status(500).json({ error: 'Server not configured. Set GOOGLE_API_KEY (and optionally GEMINI_API_KEY).' });
     }
 
     if (!DRIVE_API_KEY || !GEMINI_API_KEY) {
