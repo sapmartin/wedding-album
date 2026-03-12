@@ -5,10 +5,12 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-const DRIVE_API_KEY   = process.env.GOOGLE_API_KEY;
-const GEMINI_API_KEY  = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-const FOLDER_ID       = process.env.GDRIVE_FOLDER_ID;
-const ALLOWED_ORIGIN  = process.env.ALLOWED_ORIGIN || 'https://em-our-day.onrender.com';
+const DRIVE_API_KEY = process.env.GOOGLE_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+const FOLDER_ID = process.env.GDRIVE_FOLDER_ID;
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || 'https://em-our-day.onrender.com';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash-latest';
+const GEMINI_API_VERSION = process.env.GEMINI_API_VERSION || 'v1beta';
 
 // ── CORS — only allow requests from our own frontend ──
 app.use((req, res, next) => {
@@ -16,7 +18,7 @@ app.use((req, res, next) => {
   const referer = req.headers.referer || '';
 
   // Allow same-origin requests (no origin header) and our frontend
-  const originOk  = !origin || origin === ALLOWED_ORIGIN;
+  const originOk = !origin || origin === ALLOWED_ORIGIN;
   const refererOk = !referer || referer.startsWith(ALLOWED_ORIGIN);
 
   if (!originOk || !refererOk) {
@@ -29,7 +31,52 @@ app.use((req, res, next) => {
   next();
 });
 
-const PROMPT = `You are a mischievous archivist cataloguing a mysterious photo archive. Look carefully at this photo and write ONE short, absurd, fictional caption (2–3 sentences). Treat everyone in it as complete strangers — invent ridiculous names and a made-up scenario that has absolutely nothing to do with weddings, romance, or formal events. Be deadpan and dry. Examples: "Gerald, seen here moments after accidentally bidding $40,000 on a decorative gourd at auction. His lawyer has advised him not to comment." or "Brenda and Keith, attending what they believed was a free cheese tasting. It was not." Return ONLY the caption — no quotes, no preamble, nothing else.`;
+const CAPTION_PROMPT = `Write one witty caption for this wedding photo.
+Rules:
+- Base it only on visible details in this exact image (faces, posture, clothing, lighting, background).
+- Tone: playful, warm, and clever.
+- 1 sentence, max 22 words.
+- No random names.
+- No surreal nonsense.
+Return only the caption.`;
+
+async function generateGeminiCaption({ base64, mime, fileId }) {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          role: 'user',
+          parts: [
+            { text: CAPTION_PROMPT },
+            { text: `Photo ID for variation: ${fileId}` },
+            { inline_data: { mime_type: mime, data: base64 } }
+          ]
+        }],
+        generationConfig: {
+          temperature: 0.95,
+          topP: 0.9,
+          maxOutputTokens: 90
+        }
+      })
+    }
+  );
+
+  const data = await response.json();
+  if (!response.ok) {
+    const message = data.error?.message || `Gemini error (${response.status})`;
+    throw new Error(message);
+  }
+
+  const caption = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+  if (!caption) {
+    throw new Error('Gemini returned an empty caption.');
+  }
+
+  return { caption, source: `gemini:${GEMINI_API_VERSION}:${GEMINI_MODEL}` };
+}
 
 const GEMINI_MODELS = [
   'gemini-2.0-flash',
@@ -111,12 +158,11 @@ app.get('/api/photos', async (req, res) => {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error?.message || 'Drive API error');
 
-    // Build thumbnail URLs (public Drive thumbnail endpoint — no auth needed for public files)
     const files = (data.files || []).map(f => ({
       id: f.id,
       name: f.name,
       mimeType: f.mimeType,
-      thumbnailUrl: `https://drive.google.com/thumbnail?id=${f.id}&sz=w600`,
+      thumbnailUrl: `https://drive.google.com/thumbnail?id=${f.id}&sz=w600`
     }));
 
     res.json(files);
@@ -135,7 +181,10 @@ app.post('/api/caption', async (req, res) => {
       return res.status(500).json({ error: 'Server not configured. Set GOOGLE_API_KEY, and optionally GEMINI_API_KEY.' });
     }
 
-    // Download image from Drive (works for public files with API key)
+    if (!DRIVE_API_KEY || !GEMINI_API_KEY) {
+      return res.status(500).json({ error: 'Server not configured. Set GOOGLE_API_KEY (and optionally GEMINI_API_KEY).' });
+    }
+
     const imgRes = await fetch(
       `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${DRIVE_API_KEY}`
     );
@@ -143,13 +192,13 @@ app.post('/api/caption', async (req, res) => {
 
     const buffer = await imgRes.arrayBuffer();
     const base64 = Buffer.from(buffer).toString('base64');
-    const mime   = (imgRes.headers.get('content-type') || mimeType || 'image/jpeg').split(';')[0];
+    const mime = (imgRes.headers.get('content-type') || mimeType || 'image/jpeg').split(';')[0];
 
-    const result = await generateGeminiCaption(base64, mime);
+    const result = await generateGeminiCaption({ base64, mime, fileId });
     res.json(result);
   } catch (err) {
     console.error('Caption error:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(503).json({ error: `Caption generation failed: ${err.message}` });
   }
 });
 
