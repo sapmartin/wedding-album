@@ -16,7 +16,7 @@ app.use((req, res, next) => {
   const referer = req.headers.referer || '';
 
   // Allow same-origin requests (no origin header) and our frontend
-  const originOk  = !origin || origin === ALLOWED_ORIGIN;
+  const originOk = !origin || origin === ALLOWED_ORIGIN;
   const refererOk = !referer || referer.startsWith(ALLOWED_ORIGIN);
 
   if (!originOk || !refererOk) {
@@ -29,7 +29,140 @@ app.use((req, res, next) => {
   next();
 });
 
-const PROMPT = `You are a mischievous archivist cataloguing a mysterious photo archive. Look carefully at this photo and write ONE short, absurd, fictional caption (2–3 sentences). Treat everyone in it as complete strangers — invent ridiculous names and a made-up scenario that has absolutely nothing to do with weddings, romance, or formal events. Be deadpan and dry. Examples: "Gerald, seen here moments after accidentally bidding $40,000 on a decorative gourd at auction. His lawyer has advised him not to comment." or "Brenda and Keith, attending what they believed was a free cheese tasting. It was not." Return ONLY the caption — no quotes, no preamble, nothing else.`;
+const BASE_PROMPT = `You are writing a funny caption for a real wedding gallery photo.
+Rules:
+- Analyze THIS photo only; mention visible details (people, mood, clothing, gestures, setting, colors, expressions).
+- Be witty and warm, not absurd nonsense.
+- Keep it to 1-2 sentences, max 35 words.
+- Do not invent random names unless visible context strongly implies them.
+- Avoid generic lines that could fit any photo.
+- Return only the caption text.`;
+
+const GEMINI_TARGETS = [
+  { apiVersion: 'v1', model: 'gemini-2.0-flash' },
+  { apiVersion: 'v1beta', model: 'gemini-1.5-flash-latest' },
+  { apiVersion: 'v1beta', model: 'gemini-1.5-flash' },
+  { apiVersion: 'v1beta', model: 'gemini-1.5-flash-8b' }
+];
+
+const RECENT_CAPTION_LIMIT = 24;
+const recentCaptions = [];
+const perPhotoCaptionHistory = new Map();
+
+function normalizeCaption(text = '') {
+  return text.toLowerCase().replace(/\s+/g, ' ').replace(/[“”"'`]/g, '').trim();
+}
+
+function rememberCaption(fileId, caption) {
+  const normalized = normalizeCaption(caption);
+  if (!normalized) return;
+
+  recentCaptions.push(normalized);
+  if (recentCaptions.length > RECENT_CAPTION_LIMIT) recentCaptions.shift();
+
+  const history = perPhotoCaptionHistory.get(fileId) || [];
+  history.push(normalized);
+  perPhotoCaptionHistory.set(fileId, history.slice(-6));
+}
+
+function isTooSimilar(caption, fileId) {
+  const normalized = normalizeCaption(caption);
+  if (!normalized) return true;
+
+  const globalDup = recentCaptions.includes(normalized);
+  const photoHistory = perPhotoCaptionHistory.get(fileId) || [];
+  const localDup = photoHistory.includes(normalized);
+
+  return globalDup || localDup;
+}
+
+function buildPrompt(fileId) {
+  const recent = recentCaptions.slice(-8);
+  const photoHistory = perPhotoCaptionHistory.get(fileId) || [];
+
+  let extra = '';
+  if (recent.length > 0) {
+    extra += `\nAvoid repeating these recent captions exactly: ${recent.join(' || ')}.`;
+  }
+  if (photoHistory.length > 0) {
+    extra += `\nThis photo has already used these captions, so produce a distinctly different one: ${photoHistory.join(' || ')}.`;
+  }
+
+  return `${BASE_PROMPT}${extra}`;
+}
+
+function isRetryableGeminiError(message = '', status = 500) {
+  const msg = message.toLowerCase();
+  if (status === 429 || status >= 500) return true;
+  return msg.includes('quota') || msg.includes('not found for api version') || msg.includes('not supported for generatecontent');
+}
+
+async function callGemini({ apiVersion, model, base64, mime, prompt, temperature }) {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/${apiVersion}/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          role: 'user',
+          parts: [
+            { text: prompt },
+            { inline_data: { mime_type: mime, data: base64 } }
+          ]
+        }],
+        generationConfig: {
+          maxOutputTokens: 120,
+          temperature,
+          topP: 0.9
+        }
+      })
+    }
+  );
+
+  const data = await res.json();
+  if (!res.ok) {
+    const message = data.error?.message || `Gemini request failed (${res.status})`;
+    const error = new Error(message);
+    error.status = res.status;
+    throw error;
+  }
+
+  return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+}
+
+async function generateGeminiCaption(base64, mime, fileId) {
+  const prompt = buildPrompt(fileId);
+  let lastRetryableError = null;
+
+  for (const target of GEMINI_TARGETS) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const caption = await callGemini({
+          ...target,
+          base64,
+          mime,
+          prompt,
+          temperature: attempt === 1 ? 0.8 : 1.0
+        });
+
+        if (!caption) continue;
+        if (isTooSimilar(caption, fileId)) continue;
+
+        rememberCaption(fileId, caption);
+        return { caption, source: `gemini:${target.apiVersion}:${target.model}` };
+      } catch (err) {
+        if (isRetryableGeminiError(err.message, err.status)) {
+          lastRetryableError = err.message;
+          break;
+        }
+        throw err;
+      }
+    }
+  }
+
+  throw new Error(lastRetryableError || 'No Gemini model produced a usable caption.');
+}
 
 const GEMINI_MODELS = [
   'gemini-2.0-flash',
@@ -143,13 +276,15 @@ app.post('/api/caption', async (req, res) => {
 
     const buffer = await imgRes.arrayBuffer();
     const base64 = Buffer.from(buffer).toString('base64');
-    const mime   = (imgRes.headers.get('content-type') || mimeType || 'image/jpeg').split(';')[0];
+    const mime = (imgRes.headers.get('content-type') || mimeType || 'image/jpeg').split(';')[0];
 
-    const result = await generateGeminiCaption(base64, mime);
+    const result = await generateGeminiCaption(base64, mime, fileId);
     res.json(result);
   } catch (err) {
     console.error('Caption error:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(503).json({
+      error: `Caption AI is temporarily unavailable: ${err.message}`
+    });
   }
 });
 
