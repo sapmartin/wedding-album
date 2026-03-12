@@ -118,6 +118,17 @@ app.post('/api/caption', async (req, res) => {
   try {
     const { fileId, mimeType } = req.body;
     if (!fileId) return res.status(400).json({ error: 'fileId required' });
+    if (!DRIVE_API_KEY || !GEMINI_API_KEY) {
+      return res.status(500).json({ error: 'Server not configured. Set GOOGLE_API_KEY, and optionally GEMINI_API_KEY.' });
+    }
+
+    if (!DRIVE_API_KEY || !GEMINI_API_KEY) {
+      return res.status(500).json({ error: 'Server not configured. Set GOOGLE_API_KEY (and optionally GEMINI_API_KEY).' });
+    }
+
+    if (!DRIVE_API_KEY || !GEMINI_API_KEY) {
+      return res.status(500).json({ error: 'Server not configured. Set GOOGLE_API_KEY (and optionally GEMINI_API_KEY).' });
+    }
 
     if (!DRIVE_API_KEY || !GEMINI_API_KEY) {
       return res.status(500).json({ error: 'Server not configured. Set GOOGLE_API_KEY (and optionally GEMINI_API_KEY).' });
