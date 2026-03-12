@@ -81,6 +81,68 @@ async function generateGeminiCaption({ base64, mime, fileId }) {
   return { caption, source: `gemini:${GEMINI_API_VERSION}:${GEMINI_MODEL}` };
 }
 
+const GEMINI_MODELS = [
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-8b'
+];
+
+const LOCAL_FALLBACK_CAPTIONS = [
+  'Margo and Neil arrived expecting a CPR course and accidentally joined the International Society for Competitive Napping. Their pose scored a 9.4 from the judges.',
+  'Seen here: two regional managers seconds before unveiling a 74-slide presentation titled “Soup Forecasting in Unstable Markets.” Nobody was emotionally prepared.',
+  'Dale and Priya thought this was a routine passport photo. It was, in fact, evidence submission for the Great Municipal Pigeon Arbitration of 2026.'
+];
+
+function makeLocalFallbackCaption() {
+  return LOCAL_FALLBACK_CAPTIONS[Math.floor(Math.random() * LOCAL_FALLBACK_CAPTIONS.length)];
+}
+
+function isRetryableGeminiError(errorMessage = '') {
+  const msg = errorMessage.toLowerCase();
+  return msg.includes('quota') || msg.includes('not found for api version') || msg.includes('is not supported for generatecontent');
+}
+
+async function generateGeminiCaption(base64, mime) {
+  let lastError = 'Gemini request failed';
+
+  for (const model of GEMINI_MODELS) {
+    const geminiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [
+            { inline_data: { mime_type: mime, data: base64 } },
+            { text: PROMPT }
+          ]}],
+          generationConfig: { maxOutputTokens: 200, temperature: 1.2 }
+        })
+      }
+    );
+
+    const geminiData = await geminiRes.json();
+
+    if (geminiRes.ok) {
+      const caption = geminiData.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      if (caption) return { caption, source: `gemini:${model}` };
+      lastError = `No caption returned by model ${model}`;
+      continue;
+    }
+
+    lastError = geminiData.error?.message || `Gemini error (${geminiRes.status}) for model ${model}`;
+    if (!isRetryableGeminiError(lastError)) {
+      throw new Error(lastError);
+    }
+  }
+
+  return {
+    caption: makeLocalFallbackCaption(),
+    source: 'local-fallback',
+    warning: `Gemini unavailable: ${lastError}`
+  };
+}
+
 // ── LIST PHOTOS FROM DRIVE FOLDER ──
 app.get('/api/photos', async (req, res) => {
   try {
@@ -118,6 +180,13 @@ app.post('/api/caption', async (req, res) => {
   try {
     const { fileId, mimeType } = req.body;
     if (!fileId) return res.status(400).json({ error: 'fileId required' });
+    if (!DRIVE_API_KEY || !GEMINI_API_KEY) {
+      return res.status(500).json({ error: 'Server not configured. Set GOOGLE_API_KEY, and optionally GEMINI_API_KEY.' });
+    }
+
+    if (!DRIVE_API_KEY || !GEMINI_API_KEY) {
+      return res.status(500).json({ error: 'Server not configured. Set GOOGLE_API_KEY (and optionally GEMINI_API_KEY).' });
+    }
 
     if (!DRIVE_API_KEY || !GEMINI_API_KEY) {
       return res.status(500).json({ error: 'Server not configured. Set GOOGLE_API_KEY (and optionally GEMINI_API_KEY).' });
