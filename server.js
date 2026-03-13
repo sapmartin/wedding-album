@@ -73,7 +73,7 @@ app.post('/api/caption', async (req, res) => {
 
     // Send to Llama 3.2 Vision via Hugging Face (free, no region restrictions)
     const hfRes = await fetch(
-      'https://api-inference.huggingface.co/models/meta-llama/Llama-3.2-11B-Vision-Instruct/v1/chat/completions',
+      'https://router.huggingface.co/models/meta-llama/Llama-3.2-11B-Vision-Instruct/v1/chat/completions',
       {
         method: 'POST',
         headers: {
